@@ -948,6 +948,13 @@ function buildProtocolFields(hostData: SSHHostData): Record<string, unknown> {
       ? (hostData.telnetPassword ?? null)
       : null,
     telnetPort: hostData.enableTelnet ? (hostData.telnetPort ?? null) : null,
+    // Null means "unspecified": the server clears the column, which is what a
+    // user picking the default option expects. Never coerced to false.
+    connectionOrigin:
+      hostData.connectionOrigin === "local" ||
+      hostData.connectionOrigin === "remote"
+        ? hostData.connectionOrigin
+        : null,
   };
 }
 
@@ -3153,6 +3160,41 @@ export async function getCredentials(): Promise<any> {
   }
 }
 
+/**
+ * Reads one decrypted secret field off a host.
+ *
+ * The host list endpoint strips every secret, so anything that needs a
+ * plaintext value (the host editor's password fields, the native SSH
+ * handshake) has to ask for it explicitly. Returns null when the host has no
+ * value stored for that field, which the host editor renders as an empty box.
+ */
+export async function getHostPassword(
+  hostId: number,
+  field:
+    | "password"
+    | "sudoPassword"
+    | "rdpPassword"
+    | "vncPassword"
+    | "telnetPassword"
+    | "key"
+    | "keyPassword",
+): Promise<string | null> {
+  try {
+    const response = await sshHostApi.get(
+      `/db/host/${hostId}/password?field=${encodeURIComponent(field)}`,
+    );
+    const value = response.data?.value;
+    return typeof value === "string" ? value : null;
+  } catch (error) {
+    // A host that simply has no such secret is the normal case; only surface
+    // real transport failures.
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null;
+    }
+    handleApiError(error, "fetch host password");
+  }
+}
+
 export async function getCredentialDetails(credentialId: number): Promise<any> {
   try {
     const response = await authApi.get(`/credentials/${credentialId}`);
@@ -3213,15 +3255,67 @@ export async function getCredentialFolders(): Promise<any> {
   }
 }
 
-// Get SSH host with resolved credentials
-export async function getSSHHostWithCredentials(hostId: number): Promise<any> {
+export interface NativeSSHPlan {
+  id: number;
+  /** Login name to dial with; the host list strips it, so it comes from here. */
+  username: string | null;
+  authType: string;
+  password: string | null;
+  key: string | null;
+  keyPassword: string | null;
+  keyType: string | null;
+  /**
+   * Server-pinned host key fingerprint, when the host has one. Used to trust a
+   * already-known key silently; null means "no server-side pin, ask the user".
+   */
+  hostKeyFingerprint: string | null;
+  hostKeyType: string | null;
+  hostKeyAlgorithm: string | null;
+}
+
+/**
+ * Fetches everything a native SSH client needs to dial one host from the
+ * phone's own network stack.
+ *
+ * This replaces the old call to `/db/host/{id}/with-credentials`, a route that
+ * does not exist upstream: that request always 404'd and was swallowed by a
+ * `.catch(() => {})`, so credential fields silently stayed empty. Secrets are
+ * fetched here only, at connect time, and kept in memory.
+ */
+export async function getNativeSSHPlan(
+  hostId: number,
+): Promise<NativeSSHPlan | null> {
   try {
-    const response = await sshHostApi.get(
-      `/db/host/${hostId}/with-credentials`,
-    );
-    return response.data ? normalizeSSHHost(response.data) : response.data;
+    const response = await sshHostApi.get(`/db/host/${hostId}/native-ssh`);
+    const data = response.data ?? {};
+    return {
+      id: hostId,
+      username: typeof data.username === "string" ? data.username : null,
+      authType: typeof data.authType === "string" ? data.authType : "",
+      password: typeof data.password === "string" ? data.password : null,
+      key: typeof data.key === "string" ? data.key : null,
+      keyPassword:
+        typeof data.keyPassword === "string" ? data.keyPassword : null,
+      keyType: typeof data.keyType === "string" ? data.keyType : null,
+      hostKeyFingerprint:
+        typeof data.hostKeyFingerprint === "string"
+          ? data.hostKeyFingerprint
+          : null,
+      hostKeyType:
+        typeof data.hostKeyType === "string" ? data.hostKeyType : null,
+      hostKeyAlgorithm:
+        typeof data.hostKeyAlgorithm === "string"
+          ? data.hostKeyAlgorithm
+          : null,
+    };
   } catch (error) {
-    handleApiError(error, "fetch SSH host with credentials");
+    // The host is gone (deleted, or no longer shared with this account): that is
+    // a normal outcome the caller renders as "cannot dial", not a crash. Every
+    // other failure — a network drop, a server error — has to stay distinguishable.
+    if (axios.isAxiosError(error) && error.response?.status === 404) {
+      return null;
+    }
+    handleApiError(error, "fetch native SSH connection plan");
   }
 }
 

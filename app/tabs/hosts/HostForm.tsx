@@ -12,7 +12,8 @@ import {
 import {
   createSSHHost,
   updateSSHHost,
-  getSSHHostWithCredentials,
+  getNativeSSHPlan,
+  getHostPassword,
   getCredentials,
   getSSHHosts,
 } from "@/app/main-axios";
@@ -30,6 +31,13 @@ import { toast } from "@/app/utils/toast";
 
 type AuthType = "password" | "key" | "credential" | "none";
 type TabId = "general" | "ssh" | "tunnels" | "rdp" | "vnc" | "telnet";
+/**
+ * Empty string is the "default (remote)" option. The server stores null for it
+ * and every other device resolves an unset origin to remote, so keeping a
+ * distinct empty state lets the user return to the default without the form
+ * silently flipping an explicit "remote" into "cleared".
+ */
+type ConnectionOriginChoice = "" | "local" | "remote";
 
 interface FormState {
   name: string;
@@ -66,6 +74,7 @@ interface FormState {
   telnetPassword: string;
   telnetPort: string;
   macAddress: string;
+  connectionOrigin: ConnectionOriginChoice;
   // Organization
   folder: string;
   tags: string;
@@ -103,6 +112,7 @@ const EMPTY: FormState = {
   telnetPassword: "",
   telnetPort: "23",
   macAddress: "",
+  connectionOrigin: "",
   folder: "",
   tags: "",
   pin: false,
@@ -183,25 +193,39 @@ export default function HostForm({
       telnetUser: host.telnetUser ?? "",
       telnetPort: String(host.telnetPort ?? 23),
       macAddress: host.macAddress ?? "",
+      connectionOrigin:
+        host.connectionOrigin === "local" || host.connectionOrigin === "remote"
+          ? host.connectionOrigin
+          : "",
       folder: host.folder ?? "",
       tags: (host.tags ?? []).join(", "),
       pin: !!host.pin,
       notes: host.notes ?? "",
     });
-    getSSHHostWithCredentials(host.id)
-      .then((full) => {
-        if (!full) return;
-        setForm((f) => ({
-          ...f,
-          password: full.password ?? "",
-          key: full.key ?? "",
-          keyPassword: full.keyPassword ?? "",
-          rdpPassword: full.rdpPassword ?? "",
-          vncPassword: full.vncPassword ?? "",
-          telnetPassword: full.telnetPassword ?? "",
-        }));
-      })
-      .catch(() => {});
+    // Secrets are never part of the host list, so pull the ones this form can
+    // edit. Only the SSH fields come back from the native-SSH plan; the
+    // desktop-protocol secrets keep using the per-field password endpoint.
+    Promise.allSettled([
+      getNativeSSHPlan(host.id),
+      getHostPassword(host.id, "rdpPassword"),
+      getHostPassword(host.id, "vncPassword"),
+      getHostPassword(host.id, "telnetPassword"),
+    ]).then(([ssh, rdp, vnc, telnet]) => {
+      setForm((f) => ({
+        ...f,
+        // A failed fetch keeps whatever the form already shows. Blanking the
+        // boxes instead would read as "this host has no credentials" and invite
+        // a save that clears them.
+        password: ssh.status === "fulfilled" ? (ssh.value?.password ?? "") : f.password,
+        key: ssh.status === "fulfilled" ? (ssh.value?.key ?? "") : f.key,
+        keyPassword:
+          ssh.status === "fulfilled" ? (ssh.value?.keyPassword ?? "") : f.keyPassword,
+        rdpPassword: rdp.status === "fulfilled" ? (rdp.value ?? "") : f.rdpPassword,
+        vncPassword: vnc.status === "fulfilled" ? (vnc.value ?? "") : f.vncPassword,
+        telnetPassword:
+          telnet.status === "fulfilled" ? (telnet.value ?? "") : f.telnetPassword,
+      }));
+    });
   }, [visible, host]);
 
   // The tab strip: General is always present; protocol tabs follow their toggle.
@@ -325,6 +349,7 @@ export default function HostForm({
       enableRdp: form.enableRdp,
       enableVnc: form.enableVnc,
       enableTelnet: form.enableTelnet,
+      connectionOrigin: form.connectionOrigin || null,
       // Protocol fields — the backend null-guards these by their enable flag.
       rdpUser: form.rdpUser,
       rdpPassword: form.rdpPassword,
@@ -654,6 +679,31 @@ export default function HostForm({
                       </View>
                     )}
                   </Field>
+                ) : null}
+              </Section>
+
+              <Section title="Connection Source">
+                <SegmentedControl<ConnectionOriginChoice>
+                  value={form.connectionOrigin}
+                  onChange={(v) => set("connectionOrigin", v)}
+                  options={[
+                    { id: "", label: "Default (Server)" },
+                    { id: "remote", label: "Server" },
+                    { id: "local", label: "This Device" },
+                  ]}
+                />
+                <Text className="text-[11px] leading-4 text-muted-foreground">
+                  {form.connectionOrigin === "local"
+                    ? "SSH is dialed from this phone, so a VPN or proxy running on it applies. File manager, Docker, stats and tunnels still go through the Termix server."
+                    : "The Termix server dials SSH on this phone's behalf. Choose This Device when only the phone's network can reach this host."}
+                </Text>
+                {form.connectionOrigin === "local" &&
+                (host?.jumpHosts?.length ?? 0) > 0 ? (
+                  <Text className="text-[11px] leading-4 text-destructive">
+                    Jump hosts, SOCKS5 proxies, port knocking and Warpgate only
+                    work on the server channel. This host will still connect
+                    directly from the phone, but those settings are ignored.
+                  </Text>
                 ) : null}
               </Section>
 

@@ -103,6 +103,12 @@ export function HostActionSheet({
 
   const ssh = isSshHost(host);
   const metricsEnabled = ssh && parseStatsConfig(host).metricsEnabled !== false;
+  // Only the terminal is dialed by this phone. Everything else still goes
+  // through the Termix server, which for a "the phone's VPN is the only way
+  // in" host is exactly the path that does not reach it. Label those actions
+  // instead of hiding them, so the user knows what to expect.
+  const phoneDialed = ssh && host.connectionOrigin === "local";
+  const viaServerNote = "via server";
 
   // SSH-gated connection actions (mirrors the web's getSshActions).
   const sshActions = [
@@ -113,20 +119,34 @@ export function HostActionSheet({
       ? {
           type: "filemanager" as SessionType,
           icon: FolderSearch,
-          label: "File Manager",
+          label: phoneDialed ? `File Manager (${viaServerNote})` : "File Manager",
         }
       : null,
     ssh && host.enableDocker
-      ? { type: "docker" as SessionType, icon: Box, label: "Docker" }
+      ? {
+          type: "docker" as SessionType,
+          icon: Box,
+          label: phoneDialed ? `Docker (${viaServerNote})` : "Docker",
+        }
       : null,
     ssh &&
     host.enableTunnel &&
     host.tunnelConnections &&
     host.tunnelConnections.length > 0
-      ? { type: "tunnel" as SessionType, icon: Network, label: "Tunnels" }
+      ? {
+          type: "tunnel" as SessionType,
+          icon: Network,
+          label: phoneDialed ? `Tunnels (${viaServerNote})` : "Tunnels",
+        }
       : null,
     metricsEnabled
-      ? { type: "stats" as SessionType, icon: Server, label: "Server Stats" }
+      ? {
+          type: "stats" as SessionType,
+          icon: Server,
+          label: phoneDialed
+            ? `Server Stats (${viaServerNote})`
+            : "Server Stats",
+        }
       : null,
   ].filter(Boolean) as {
     type: SessionType;
@@ -173,6 +193,18 @@ export function HostActionSheet({
 
   return (
     <BottomSheet visible={visible} onClose={onClose}>
+      {/* Local-origin hosts only dial the terminal from this phone; saying so
+          up front prevents the "the VPN works, why does file transfer fail"
+          support question. */}
+      {phoneDialed ? (
+        <View className="mb-2 border border-accent-brand/30 bg-accent-brand/10 px-3 py-2">
+          <Text className="text-[11px] leading-4 text-accent-brand">
+            This host connects from this device, so a VPN or proxy running on it
+            applies. Only the terminal uses that path — the other features below
+            still go through the Termix server.
+          </Text>
+        </View>
+      ) : null}
       {/* Header */}
       <View className="flex-row items-center gap-2.5 border-b border-border px-4 pb-3 pt-1">
         <View

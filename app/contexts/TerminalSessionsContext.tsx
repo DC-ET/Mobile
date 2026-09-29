@@ -210,14 +210,21 @@ export const TerminalSessionsProvider: React.FC<
         };
 
         // Persist this tab server-side for cross-device awareness.
-        addOpenTab({
-          id: instanceId,
-          tabType: toTabType(type, opts?.remoteProtocol),
-          hostId: host.id,
-          label: title,
-          tabOrder: prev.length,
-          backendSessionId: opts?.restoredSessionId ?? null,
-        });
+        //
+        // A local-origin terminal has no server session to hand over, so it is
+        // deliberately not registered: listing it would invite another device
+        // to "take over" a session that only exists on this phone.
+        const isPhoneDialedTerminal = type === "terminal" && host.connectionOrigin === "local";
+        if (!isPhoneDialedTerminal) {
+          addOpenTab({
+            id: instanceId,
+            tabType: toTabType(type, opts?.remoteProtocol),
+            hostId: host.id,
+            label: title,
+            tabOrder: prev.length,
+            backendSessionId: opts?.restoredSessionId ?? null,
+          });
+        }
 
         const updatedSessions = prev.map((session) => ({
           ...session,
@@ -239,8 +246,13 @@ export const TerminalSessionsProvider: React.FC<
       const sessionToRemove = prev.find((session) => session.id === sessionId);
       if (!sessionToRemove) return prev;
 
-      // Forget the server-side record for this tab.
-      deleteOpenTab(sessionToRemove.instanceId);
+      // Forget the server-side record for this tab, if it ever had one.
+      const wasRegistered =
+        sessionToRemove.type !== "terminal" ||
+        sessionToRemove.host.connectionOrigin !== "local";
+      if (wasRegistered) {
+        deleteOpenTab(sessionToRemove.instanceId);
+      }
 
       let updatedSessions = prev.filter((session) => session.id !== sessionId);
 

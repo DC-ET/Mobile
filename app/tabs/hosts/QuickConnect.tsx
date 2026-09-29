@@ -36,6 +36,11 @@ export function QuickConnect({
   const [authType, setAuthType] = useState<AuthType>("password");
   const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
+  // Quick Connect has no stored host, so "remote" (the server dials) is the
+  // honest default and "This Device" is an explicit opt-in.
+  const [connectionOrigin, setConnectionOrigin] = useState<
+    "remote" | "local"
+  >("remote");
 
   const reset = () => {
     setIp("");
@@ -44,6 +49,7 @@ export function QuickConnect({
     setAuthType("password");
     setPassword("");
     setKey("");
+    setConnectionOrigin("remote");
   };
 
   const connect = () => {
@@ -63,6 +69,7 @@ export function QuickConnect({
       authType,
       password: authType === "password" ? password : undefined,
       key: authType === "key" ? key : undefined,
+      connectionOrigin,
       enableTerminal: true,
       enableTunnel: false,
       enableFileManager: false,
@@ -141,6 +148,23 @@ export function QuickConnect({
               { id: "key", label: "Key" },
             ]}
           />
+
+          <View className="gap-1.5">
+            <Label>Connection Source</Label>
+            <SegmentedControl<"remote" | "local">
+              value={connectionOrigin}
+              onChange={setConnectionOrigin}
+              options={[
+                { id: "remote", label: "Server" },
+                { id: "local", label: "This Device" },
+              ]}
+            />
+            <Text className="text-[11px] leading-4 text-muted-foreground">
+              {connectionOrigin === "local"
+                ? "SSH is dialed from this phone, so a VPN or proxy running on it applies. The first connection asks you to confirm the host key."
+                : "The Termix server dials SSH on this phone's behalf."}
+            </Text>
+          </View>
 
           {authType === "password" ? (
             <View className="gap-1.5">

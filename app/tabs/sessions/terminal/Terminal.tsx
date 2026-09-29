@@ -44,6 +44,9 @@ import {
   type TerminalHostConfig,
   type HostKeyData,
 } from "./NativeWebSocketManager";
+import { NativeSSHSession } from "./NativeSSHSession";
+import { disconnectAllNativeSsh } from "../../../../modules/native-ssh";
+import type { NativeWSConfig, TerminalTransport } from "./TerminalTransport";
 import { loadXtermAssets } from "./loadXtermAssets";
 import { useConnectionLog, ConnectionLog } from "../_shared/useConnectionLog";
 
@@ -64,6 +67,11 @@ interface TerminalProps {
     forceKeyboardInteractive?: boolean;
     overrideCredentialUsername?: boolean;
     terminalConfig?: Partial<TerminalConfig>;
+    /** "local" dials SSH from this phone; anything else goes via the server. */
+    connectionOrigin?: "local" | "remote" | null;
+    hostKeyFingerprint?: string | null;
+    hostKeyType?: string | null;
+    hostKeyAlgorithm?: string | null;
   };
   isVisible: boolean;
   title?: string;
@@ -102,7 +110,7 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
     ref,
   ) => {
     const webViewRef = useRef<WebView>(null);
-    const wsManagerRef = useRef<NativeWebSocketManager | null>(null);
+    const transportRef = useRef<TerminalTransport | null>(null);
     const terminalColsRef = useRef(80);
     const terminalRowsRef = useRef(24);
     // Pixel height of the visible terminal area as measured by RN layout.
@@ -184,7 +192,17 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
     const [hostKeyVerification, setHostKeyVerification] = useState<{
       scenario: "new" | "changed";
       data: HostKeyData;
+      fingerprint?: string;
     } | null>(null);
+
+    /**
+     * True while the active transport dials SSH from this phone.
+     *
+     * Interactive prompts that only exist on the server-dialed path (TOTP,
+     * keyboard-interactive, Warpgate, key passphrase) are hidden rather than
+     * shown-but-broken on a local connection.
+     */
+    const [isLocalChannel, setIsLocalChannel] = useState(false);
 
     const xtermAssetsRef = useRef<{
       xtermJs: string;
@@ -267,6 +285,62 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
         }
       },
       [onClose],
+    );
+
+    /**
+     * Answers an interactive prompt the server-dialed path raised.
+     *
+     * The local path has no equivalent of the server's TOTP / password prompt
+     * protocol, so a prompt there is reported rather than silently dropped:
+     * the dialog closes, but the user is told the feature needs the server
+     * channel instead of the connection just hanging.
+     */
+    const sendTransportPrompt = useCallback(
+      (code: string, isPasswordPrompt: boolean) => {
+        if (isLocalChannel) {
+          showToast.error(
+            "This server asks for an extra authentication step that the on-device SSH channel does not support. Switch this host back to the server connection source.",
+          );
+          return;
+        }
+        transportRef.current?.sendTotpResponse?.(code, isPasswordPrompt);
+      },
+      [isLocalChannel],
+    );
+
+    /**
+     * Re-dials with freshly typed credentials.
+     *
+     * On the local path the typed secret has to go into the native dialer, so
+     * the host config is updated in place and the session restarted.
+     */
+    const retryLocalWithCredentials = useCallback(
+      (credentials: {
+        password?: string;
+        sshKey?: string;
+        keyPassword?: string;
+      }) => {
+        if (!isLocalChannel) {
+          transportRef.current?.sendReconnectWithCredentials?.(
+            credentials,
+            terminalColsRef.current,
+            terminalRowsRef.current,
+          );
+          return;
+        }
+
+        const session = transportRef.current;
+        if (!(session instanceof NativeSSHSession)) return;
+
+        session.overrideCredentials({
+          password: credentials.password,
+          key: credentials.sshKey,
+          keyPassword: credentials.keyPassword,
+          authType: credentials.password ? "password" : "key",
+        });
+        void session.reconnect();
+      },
+      [isLocalChannel],
     );
 
     const generateHTML = useCallback(
@@ -938,7 +1012,7 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
               () => {
                 const key = envVar.key;
                 const value = envVar.value;
-                wsManagerRef.current?.sendInput(`export ${key}="${value}"\n`);
+                transportRef.current?.sendInput(`export ${key}="${value}"\n`);
               },
               100 * (index + 1),
             );
@@ -955,7 +1029,7 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
                 (s: any) => s.id === terminalConfig.startupSnippetId,
               );
               if (snippet) {
-                wsManagerRef.current?.sendInput(`${snippet.content}\n`);
+                transportRef.current?.sendInput(`${snippet.content}\n`);
               }
             } catch (err) {
               console.warn("Failed to execute startup snippet:", err);
@@ -968,21 +1042,40 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
             100 * (terminalConfig.environmentVariables?.length || 0) +
             (terminalConfig.startupSnippetId ? 400 : 200);
           setTimeout(() => {
-            wsManagerRef.current?.sendInput(`${terminalConfig.moshCommand!}\n`);
+            transportRef.current?.sendInput(`${terminalConfig.moshCommand!}\n`);
           }, moshDelay);
         }
       }, 500);
     }, [config, hostConfig.terminalConfig]);
 
+    /**
+     * Answers the host key dialog.
+     *
+     * Only the local channel needs the fingerprint handed back (the server
+     * remembers it), so this forwards it when present and otherwise defers to
+     * the transport.
+     */
+    const respondToHostKey = useCallback(
+      (accept: boolean, fingerprint?: string) => {
+        const session = transportRef.current;
+        if (session instanceof NativeSSHSession) {
+          void session.resolveHostKey(accept, fingerprint);
+          return;
+        }
+        session?.sendHostKeyResponse?.(accept ? "accept" : "reject");
+      },
+      [],
+    );
+
     const handleTotpSubmit = useCallback(
       (code: string) => {
-        wsManagerRef.current?.sendTotpResponse(code, isPasswordPrompt);
+        sendTransportPrompt(code, isPasswordPrompt);
         setTotpRequired(false);
         setTotpPrompt("");
         setIsPasswordPrompt(false);
         setConnectionState("connecting");
       },
-      [isPasswordPrompt],
+      [isPasswordPrompt, sendTransportPrompt],
     );
 
     const handleAuthDialogSubmit = useCallback(
@@ -991,15 +1084,11 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
         sshKey?: string;
         keyPassword?: string;
       }) => {
-        wsManagerRef.current?.sendReconnectWithCredentials(
-          credentials,
-          terminalColsRef.current,
-          terminalRowsRef.current,
-        );
+        retryLocalWithCredentials(credentials);
         setShowAuthDialog(false);
         setConnectionState("connecting");
       },
-      [],
+      [retryLocalWithCredentials],
     );
 
     const handleTerminalLayout = useCallback((event: LayoutChangeEvent) => {
@@ -1037,13 +1126,13 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
                 `window.setTerminalViewportHeight && window.setTerminalViewportHeight(${viewportHeightRef.current}); true;`,
               );
             }
-            wsManagerRef.current?.connect(message.data.cols, message.data.rows);
+            transportRef.current?.connect(message.data.cols, message.data.rows);
             break;
 
           case "resize":
             terminalColsRef.current = message.data.cols;
             terminalRowsRef.current = message.data.rows;
-            wsManagerRef.current?.sendResize(
+            transportRef.current?.sendResize(
               message.data.cols,
               message.data.rows,
             );
@@ -1064,7 +1153,7 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
           case "input":
             // Wheel/mouse input synthesized inside the WebView (xterm onData),
             // forwarded to the pty so TUI apps can scroll their context.
-            wsManagerRef.current?.sendInput(message.data);
+            transportRef.current?.sendInput(message.data);
             break;
         }
       } catch (error) {
@@ -1073,9 +1162,9 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
     }, []);
 
     useEffect(() => {
-      wsManagerRef.current?.destroy();
+      transportRef.current?.destroy();
 
-      wsManagerRef.current = new NativeWebSocketManager({
+      const transportConfig: NativeWSConfig = {
         hostConfig: hostConfig as TerminalHostConfig,
         tabInstanceId,
         initialSessionId,
@@ -1146,7 +1235,10 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
           setConnectionState("disconnected");
         },
         onHostKeyVerificationRequired: (scenario, data) => {
-          setHostKeyVerification({ scenario, data });
+          // Keep the fingerprint on the state, not only on `data`: accepting has
+          // to persist it, and reading it back out of a nested object here is
+          // the kind of detail that silently breaks the trust store.
+          setHostKeyVerification({ scenario, data, fingerprint: data.fingerprint });
         },
         onPassphraseRequired: () => {
           setPassphraseRequired(true);
@@ -1165,7 +1257,16 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
           handleConnectionFailure(message);
         },
         onConnectionLog: (entry) => log.ingest([entry]),
-      });
+      };
+
+      // Only an explicit "local" changes the channel. An unset origin falls
+      // back to remote (the server dials), which is what every host created
+      // before this feature existed expects.
+      const usesLocalChannel = hostConfig.connectionOrigin === "local";
+      transportRef.current = usesLocalChannel
+        ? new NativeSSHSession(transportConfig)
+        : new NativeWebSocketManager(transportConfig);
+      setIsLocalChannel(usesLocalChannel);
 
       log.clear();
       setWebViewKey((prev) => prev + 1);
@@ -1183,13 +1284,26 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
       if (xtermAssetsRef.current) {
         setHtmlContent(generateHTML(xtermAssetsRef.current));
       }
+      // The channel is a property of the connection, not of the tab: a host
+      // switched between "server" and "this device" (or a different tab instance
+      // revived in place) needs a new transport, and leaving the old one alive
+      // would keep a native SSH connection and its event subscription running
+      // for a session nobody is looking at.
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [hostConfig.id]);
+    }, [hostConfig.id, hostConfig.connectionOrigin, tabInstanceId]);
 
     useEffect(() => {
       return () => {
-        wsManagerRef.current?.destroy();
-        wsManagerRef.current = null;
+        const transport = transportRef.current;
+        transport?.destroy();
+        transportRef.current = null;
+        // `destroy` closes the session it knows about, but a local dial that is
+        // still handshaking has no session id to close yet. Without this the
+        // native worker thread and its socket stay alive for the rest of the
+        // app's lifetime, and the events they emit have nowhere to land.
+        if (transport instanceof NativeSSHSession) {
+          void disconnectAllNativeSsh().catch(() => {});
+        }
         if (dataFlushTimerRef.current) {
           clearTimeout(dataFlushTimerRef.current);
           dataFlushTimerRef.current = null;
@@ -1210,7 +1324,7 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
       () => ({
         sendInput: (data: string) => {
           recordCommandInput(data);
-          wsManagerRef.current?.sendInput(data);
+          transportRef.current?.sendInput(data);
         },
         fit: () => {
           try {
@@ -1229,10 +1343,10 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
           );
         },
         notifyBackgrounded: () => {
-          wsManagerRef.current?.notifyBackgrounded();
+          transportRef.current?.notifyBackgrounded();
         },
         notifyForegrounded: () => {
-          wsManagerRef.current?.notifyForegrounded();
+          transportRef.current?.notifyForegrounded();
         },
         scrollToBottom: () => {
           try {
@@ -1479,20 +1593,20 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
           scenario={hostKeyVerification?.scenario ?? "new"}
           data={hostKeyVerification?.data ?? null}
           onAccept={() => {
-            wsManagerRef.current?.sendHostKeyResponse("accept");
+            respondToHostKey(true, hostKeyVerification?.data.fingerprint);
             setHostKeyVerification(null);
           }}
           onReject={() => {
-            wsManagerRef.current?.sendHostKeyResponse("reject");
+            respondToHostKey(false, hostKeyVerification?.data.fingerprint);
             setHostKeyVerification(null);
             if (onClose) onClose();
           }}
         />
 
         <PassphraseDialog
-          visible={passphraseRequired}
+          visible={passphraseRequired && !isLocalChannel}
           onSubmit={(passphrase) => {
-            wsManagerRef.current?.sendPassphraseResponse(passphrase);
+            transportRef.current?.sendPassphraseResponse?.(passphrase);
             setPassphraseRequired(false);
           }}
           onCancel={() => {
@@ -1508,11 +1622,11 @@ const TerminalComponent = forwardRef<TerminalHandle, TerminalProps>(
         />
 
         <WarpgateDialog
-          visible={warpgateAuth !== null}
+          visible={warpgateAuth !== null && !isLocalChannel}
           url={warpgateAuth?.url ?? ""}
           securityKey={warpgateAuth?.securityKey ?? ""}
           onContinue={() => {
-            wsManagerRef.current?.sendWarpgateContinue();
+            transportRef.current?.sendWarpgateContinue?.();
             setWarpgateAuth(null);
           }}
           onCancel={() => {

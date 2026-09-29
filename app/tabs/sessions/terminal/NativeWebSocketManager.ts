@@ -15,6 +15,11 @@ export interface TerminalHostConfig {
   jumpHosts?: { hostId: number }[];
   forceKeyboardInteractive?: boolean;
   overrideCredentialUsername?: boolean;
+  // Host key the Termix server has pinned for this host. Only used by the
+  // native (phone-local) channel; the server verifies keys on its own path.
+  hostKeyFingerprint?: string | null;
+  hostKeyType?: string | null;
+  hostKeyAlgorithm?: string | null;
 }
 
 export type WsState =

@@ -127,6 +127,11 @@ export default function Host({
             {host.name}
           </Text>
           {host.pin ? <Pin size={11} color={accent} fill={accent} /> : null}
+          {/* Distinguishes hosts dialed from this phone before the user opens
+              the action sheet and finds out why other features still fail. */}
+          {host.connectionOrigin === "local" ? (
+            <FeatureChip label="This device" />
+          ) : null}
           {protocols.map((p) => (
             <FeatureChip key={p} label={p} />
           ))}

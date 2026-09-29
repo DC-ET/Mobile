@@ -17,6 +17,19 @@ export interface SSHHost {
   // a device and its sync server, so connect calls pass this when present.
   syncId?: string | null;
   connectionType?: "ssh" | "rdp" | "vnc" | "telnet" | string;
+  /**
+   * Which network stack dials this host's SSH. `"remote"` (the default when
+   * unset) keeps the current behaviour: the Termix server connects on the
+   * phone's behalf. `"local"` makes the app dial SSH itself, so the phone's
+   * own VPN/proxy applies. Deliberately not synced across devices, matching
+   * the server's readOnlyFields for this column.
+   */
+  connectionOrigin?: "local" | "remote" | null;
+  // Host key the Termix server has pinned for this host, used by the app's own
+  // SSH dialer to trust a key the server already verified.
+  hostKeyFingerprint?: string | null;
+  hostKeyType?: string | null;
+  hostKeyAlgorithm?: string | null;
   name: string;
   ip: string;
   port: number;
@@ -115,6 +128,8 @@ export interface SSHHostData {
   enableVnc?: boolean;
   enableTelnet?: boolean;
   enableDocker?: boolean;
+  /** Omitted means "leave the server-side value untouched". */
+  connectionOrigin?: "local" | "remote" | null;
   notes?: string;
   macAddress?: string;
   rdpUser?: string;

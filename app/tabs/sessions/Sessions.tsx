@@ -689,6 +689,11 @@ export default function Sessions() {
                   overrideCredentialUsername:
                     session.host.overrideCredentialUsername,
                   terminalConfig: session.host.terminalConfig,
+                  connectionOrigin: session.host.connectionOrigin ?? null,
+                  hostKeyFingerprint:
+                    session.host.hostKeyFingerprint ?? null,
+                  hostKeyType: session.host.hostKeyType ?? null,
+                  hostKeyAlgorithm: session.host.hostKeyAlgorithm ?? null,
                 }}
                 isVisible={session.id === activeSessionId}
                 title={session.title}
